@@ -1,0 +1,16 @@
+# Data is re-fetchable from public APIs and far too large for git.
+data/
+*.parquet
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+.DS_Store

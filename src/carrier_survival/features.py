@@ -353,6 +353,8 @@ STATIC_ATTRIBUTES = (
     "business_org",
     "prior_revoke_dot",
     "undeliverable_address",
+    "mcs150_date",
+    "mcs150_mileage_year",
 )
 
 
@@ -364,11 +366,23 @@ def static_features(
     These fields are absent from the reporting exports that define the cohort,
     so restricting the lookup to that vintage yields a column of nulls. Reading
     them from *any* snapshot at or before the prediction date is still
-    point-in-time correct — a February census is knowable in April — and for a
-    registration date, staleness is irrelevant because the value cannot change.
+    point-in-time correct — a February census is knowable in April.
 
-    The one that does drift is the undeliverable-address flag, which is read
-    as-of rather than as-now for the same reason.
+    They are not equally static, and the difference matters when reading the
+    results:
+
+    ``add_date`` and ``prior_revoke_dot`` cannot change, so staleness is
+    irrelevant. The undeliverable-address flag and ``mcs150_date`` *do* drift,
+    and are read as-of rather than as-now.
+
+    For ``mcs150_date`` that lag is systematic. The only vintages carrying it
+    that precede the 2024 prediction dates are the late-2023 census exports, so
+    ``days_since_mcs150`` is measured from a reading up to eight months old at
+    the latest prediction date. A carrier that filed in between looks more
+    overdue than it is. That is noise, not leakage — it is genuinely what a
+    subscriber holding those snapshots would have known — but it means the
+    feature is weaker than a live feed would make it, and weaker at later
+    prediction dates than earlier ones.
     """
     have = [c for c in STATIC_ATTRIBUTES if c in panel.columns]
     if not have:
@@ -399,6 +413,25 @@ def static_features(
 
     if "undeliverable_address" in latest.columns:
         latest["undeliverable_address"] = as_numeric_flag(latest["undeliverable_address"])
+
+    # Days since the carrier last filed an MCS-150. Not a size measure but a
+    # compliance-behaviour one: the filing is mandatory every 24 months on a
+    # schedule keyed to the USDOT number, so a carrier drifting well past its
+    # deadline has stopped doing paperwork — and carriers that stop doing
+    # paperwork are usually winding down.
+    if "mcs150_date" in latest.columns:
+        filed = pd.to_datetime(latest["mcs150_date"], errors="coerce")
+        latest["days_since_mcs150"] = (prediction_date - filed).dt.days
+        # A date after the prediction date would mean the panel leaked a future
+        # filing into an earlier vintage. Drop rather than emit a negative age.
+        latest.loc[latest["days_since_mcs150"] < 0, "days_since_mcs150"] = np.nan
+        latest = latest.drop(columns=["mcs150_date"])
+
+    if "mcs150_mileage_year" in latest.columns:
+        reported = pd.to_numeric(latest["mcs150_mileage_year"], errors="coerce")
+        age = prediction_date.year - reported
+        latest["mileage_report_age_years"] = age.where((age >= 0) & (age < 40))
+        latest = latest.drop(columns=["mcs150_mileage_year"])
 
     return latest
 

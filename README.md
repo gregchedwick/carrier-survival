@@ -23,11 +23,11 @@ split would put the same carrier on both sides and inflate every score.
 | Model | AUC | PR-AUC | Base rate | Lift |
 |---|---|---|---|---|
 | Baseline — carrier age + fleet size | 0.748 | 0.063 | 0.022 | 2.8x |
-| **Full feature set** (24 features) | **0.874** | **0.145** | 0.022 | **6.5x** |
+| **Full feature set** (26 features) | **0.889** | **0.150** | 0.022 | **6.7x** |
 
 The baseline is deliberately trivial: two columns anyone can compute in a single
-query. It exists because "the model gets 0.87 AUC" means nothing on its own. The
-full feature set beats it by **+0.127 AUC**, which is the number actually worth
+query. It exists because "the model gets 0.89 AUC" means nothing on its own. The
+full feature set beats it by **+0.142 AUC**, which is the number actually worth
 reporting.
 
 The 2.25% base rate is itself a result. An earlier version of this pipeline read
@@ -46,11 +46,11 @@ improve the model.
 
 | Fleet | Carriers | Base rate | AUC | PR-AUC |
 |---|---|---|---|---|
-| 1–2 | 2,259,837 | 2.2% | 0.868 | 0.144 |
-| 3–5 | 376,679 | 1.8% | 0.896 | 0.149 |
-| 6–20 | 201,013 | 1.8% | 0.891 | 0.138 |
-| 21–100 | 50,759 | 1.7% | 0.869 | 0.119 |
-| 100+ | 10,777 | 1.1% | 0.803 | 0.067 |
+| 1–2 | 2,259,837 | 2.2% | 0.887 | 0.150 |
+| 3–5 | 376,679 | 1.8% | 0.908 | 0.152 |
+| 6–20 | 201,013 | 1.8% | 0.898 | 0.141 |
+| 21–100 | 50,759 | 1.7% | 0.875 | 0.125 |
+| 100+ | 10,777 | 1.1% | 0.821 | 0.096 |
 
 Discrimination is strong and fairly flat from 1 to 100 units, easing off only for
 the largest fleets — where failure is rarest and most idiosyncratic.
@@ -67,14 +67,14 @@ error to warn you. Two checks run on every training run:
 
 **Solo AUC.** Any single feature separating the outcome implausibly well
 (≥ 0.90) is almost certainly derived from it. The strongest honest feature here
-reaches 0.732:
+reaches 0.743:
 
 ```
+days_since_mcs150              0.743
 carrier_age_days               0.732
 distinct_dockets               0.695
 authority_actions              0.694
 prior_discontinued             0.690
-crash_days_since_last          0.689
 ```
 
 **Temporal decay.** Train at the earliest prediction date, then score the *same
@@ -82,12 +82,12 @@ held-out carriers* twice — once at that date, once six months later. Only the
 age of the information differs, so performance should fall.
 
 ```
-scored at the same date : AUC 0.869
-scored 6 months later   : AUC 0.872
-temporal decay: -0.003 - within noise, inconclusive (needs decay > 0.01)
+scored at the same date : AUC 0.887
+scored 6 months later   : AUC 0.888
+temporal decay: -0.001 - within noise, inconclusive (needs decay > 0.01)
 ```
 
-Reported as **inconclusive**, not as a pass. Three thousandths is noise, and
+Reported as **inconclusive**, not as a pass. One thousandth is noise, and
 calling it a pass would manufacture confidence the data doesn't support.
 
 The controls are themselves tested against a **planted leak** — a feature built
@@ -199,7 +199,7 @@ public source resolves that.
 
 ## Features
 
-24 features survive the degenerate-column filter, all constructed strictly from
+26 features survive the degenerate-column filter, all constructed strictly from
 information available at the prediction date:
 
 | Group | Features |
@@ -208,6 +208,7 @@ information available at the prediction date:
 | **Authority lifecycle** | Age of authority, prior revocations, prior reinstatements, prior discontinued proceedings, total actions, distinct dockets, days since last action |
 | **Registration** | Carrier age, undeliverable address flag, prior revoked DOT number flag |
 | **Fleet** | Power units, driver count |
+| **Filing behaviour** | Days since last MCS-150 filing, age of the reported mileage year |
 
 Three columns are dropped automatically as degenerate: `mileage` (100% null in
 every vintage) and both fleet-trajectory features — see below.
@@ -275,15 +276,35 @@ most carriers' reported fleet is stale by regulatory design rather than by any
 defect in the pipeline. It is worth building, but it will never be the crisp
 early-warning signal it intuitively sounds like.
 
-#### The better feature is one this vintage does not carry
+#### The better feature is filing behaviour, not fleet size
 
-`mcs150_date` — *when* the carrier last filed — is 88–90% populated in the
-`mcmis` and `datahub` vintages and **0% in `reporting`**, which is the vintage
-the modelling cohort is drawn from. Days since last filing is likely more
-predictive than fleet size itself: a carrier that sails past its mandated filing
-month has stopped doing paperwork, and carriers that stop doing paperwork are
-winding down. That is a compliance-behaviour signal rather than a size signal,
-and it is the highest-value addition available.
+The same MCS-150 rule that limits fleet trajectory turns out to supply the
+strongest feature in the model.
+
+`mcs150_date` — *when* the carrier last filed — is 0% populated in `reporting`,
+the vintage the cohort is drawn from, but 89% populated in the late-2023 census
+exports that precede every prediction date. `static_features` reads slow-moving
+attributes from any earlier vintage, so it can be carried across.
+
+**`days_since_mcs150` is now the highest solo-AUC feature at 0.743**, ahead of
+carrier age at 0.732. Adding it and `mileage_report_age_years` moved the model
+from 0.874 to **0.889** and lift from 6.5x to **6.7x**.
+
+The reason it beats fleet size is that it measures behaviour rather than
+capacity. Filing is mandatory every 24 months on a published schedule. A carrier
+drifting well past its deadline has stopped doing paperwork, and carriers that
+stop doing paperwork are usually winding down — whereas a stale power-unit count
+mostly reflects when the schedule last came round.
+
+**The lag is real and worth stating.** The only vintages carrying `mcs150_date`
+before the 2024 prediction dates are the late-2023 exports, so the reading is up
+to eight months old at the last prediction date, and a carrier that filed in
+between looks more overdue than it is. That is noise, not leakage — it is
+genuinely what someone holding those snapshots would have known, and the maximum
+`mcs150_date` in the panel is 2023-12-09, comfortably before every prediction
+date. But the feature is weaker here than a live feed would make it, and weaker
+at later prediction dates than earlier ones. A monthly pull that carries the
+field would improve it for free.
 
 ---
 
@@ -332,7 +353,7 @@ population. They must all be read:
 
 | Part | Rows (202407) | Mean fleet | p90 |
 |---|---|---|---|
-| GAP Scored | 721,168 | 19.9 | 9 |
+| Scored | 721,168 | 19.9 | 9 |
 | Not Scored 1 | 350,813 | 3.2 | 5 |
 | Not Scored 2 | 789,387 | 97.7 | 3 |
 | **Combined** | **1,861,368** | | |
@@ -480,7 +501,7 @@ scripts/
   build_labels.py    Build the exit label table
   build_features.py  Build the modelling frame
   train_baseline.py  Fit baseline + full model, evaluate, check for leakage
-tests/               23 tests: discovery, feature construction, coverage, leakage
+tests/               26 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
 
@@ -499,7 +520,7 @@ python scripts/build_panel.py            # carrier-period panel + coverage repor
 python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
 
-pytest                                   # 23 tests
+pytest                                   # 26 tests
 ```
 
 Each fetch writes a manifest recording row counts, distinct carriers, null keys
@@ -526,7 +547,7 @@ dates appear as `MM/DD/YYYY` and `YYYYMMDD`, stored as text throughout.
 - **Seven prediction dates in one year.** Point-in-time features need the
   archived panel, which limits the modelling window to 2024. The model has not
   been tested across a freight cycle.
-- **The temporal-decay check is inconclusive** at `-0.003`. It is no longer
+- **The temporal-decay check is inconclusive** at `-0.001`. It is no longer
   *broken* — see defects 11 and 12 — but six months is not enough separation for
   it to say anything, which again needs more panel.
 - **Involuntary exit only.** The competing-risks arm is empty for the reasons
@@ -538,5 +559,10 @@ dates appear as `MM/DD/YYYY` and `YYYYMMDD`, stored as text throughout.
   ~1.86M full population), so those periods trip `suspect_truncation` and are
   excluded from differencing. The exclusion is correct; the label is imprecise —
   it is a scope difference, not a truncated file.
-- **`mcs150_date` is absent from the modelling vintage**, which blocks the single
-  most promising unbuilt feature. See above.
+- **`days_since_mcs150` is read with a lag of up to eight months**, because the
+  only vintages carrying it precede the prediction window. It is the strongest
+  feature in the model despite that; a live monthly feed carrying the field
+  would strengthen it further.
+- **`business_org` is all-null in the modelling window.** It appears only in the
+  `datahub` vintages, which post-date every 2024 prediction date, so the
+  point-in-time lookup correctly finds nothing.

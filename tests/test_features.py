@@ -161,6 +161,66 @@ def test_fleet_features_ignore_the_future():
     assert out.loc[1, "power_units_now"] == 6.0
 
 
+def test_days_since_mcs150_is_measured_to_the_prediction_date():
+    """The filing-recency feature counts from the last filing, not the snapshot.
+
+    MCS-150 is mandatory every 24 months, so a carrier well past that has
+    stopped filing paperwork. The feature must be anchored to the prediction
+    date or it just re-encodes which vintage the value came from.
+    """
+    panel = make_panel([
+        {"dot_number": 1, "period": "202312", "power_units": 5.0, "source_kind": "mcmis",
+         "mcs150_date": pd.Timestamp("2023-06-01")},
+        {"dot_number": 2, "period": "202312", "power_units": 5.0, "source_kind": "mcmis",
+         "mcs150_date": pd.Timestamp("2019-01-01")},   # long overdue
+        {"dot_number": 1, "period": "202408", "power_units": 5.0},
+        {"dot_number": 2, "period": "202408", "power_units": 5.0},
+    ])
+
+    date = pd.Timestamp("2024-08-31")
+    out = static_features(panel, date).set_index("dot_number")
+
+    assert out.loc[1, "days_since_mcs150"] == (date - pd.Timestamp("2023-06-01")).days
+    assert out.loc[2, "days_since_mcs150"] == (date - pd.Timestamp("2019-01-01")).days
+    assert out.loc[2, "days_since_mcs150"] > out.loc[1, "days_since_mcs150"]
+
+
+def test_a_filing_after_the_prediction_date_is_not_used():
+    """A future filing date must never produce a negative age.
+
+    If a later vintage ever leaks into the lookup, this is where it shows up —
+    as a carrier that filed in the future.
+    """
+    panel = make_panel([
+        {"dot_number": 1, "period": "202312", "power_units": 5.0, "source_kind": "mcmis",
+         "mcs150_date": pd.Timestamp("2025-06-01")},
+        {"dot_number": 1, "period": "202408", "power_units": 5.0},
+    ])
+
+    out = static_features(panel, pd.Timestamp("2024-08-31")).set_index("dot_number")
+
+    assert pd.isna(out.loc[1, "days_since_mcs150"])
+
+
+def test_mileage_report_age_rejects_impossible_years():
+    """A mileage year in the future, or decades stale, is bad data not signal."""
+    reported = {1: 2021.0, 2: 2099.0, 3: 1900.0}
+    panel = make_panel(
+        [
+            {"dot_number": n, "period": "202312", "power_units": 5.0,
+             "source_kind": "mcmis", "mcs150_mileage_year": year}
+            for n, year in reported.items()
+        ]
+        + [{"dot_number": n, "period": "202408", "power_units": 5.0} for n in reported]
+    )
+
+    out = static_features(panel, pd.Timestamp("2024-08-31")).set_index("dot_number")
+
+    assert out.loc[1, "mileage_report_age_years"] == 3
+    assert pd.isna(out.loc[2, "mileage_report_age_years"])
+    assert pd.isna(out.loc[3, "mileage_report_age_years"])
+
+
 def test_static_attributes_come_from_any_earlier_vintage():
     """Slow-moving fields may be read from an older vintage, never a newer one."""
     panel = make_panel([

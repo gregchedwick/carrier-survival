@@ -32,9 +32,9 @@ def test_every_part_of_a_split_export_is_found(tmp_path: Path):
     """
     touch(
         tmp_path / "202407",
-        "Momentum Data File GAP Scored.csv",
-        "Momentum Data File Not Scored 1.csv",
-        "Momentum Data File Not Scored 2.csv",
+        "Data File Scored.csv",
+        "Data File Not Scored 1.csv",
+        "Data File Not Scored 2.csv",
     )
 
     found = discover(tmp_path)
@@ -51,7 +51,7 @@ def test_two_vintages_of_one_month_are_not_stacked(tmp_path: Path):
     Reading both would double-count the month and mix a 2.17M-carrier registry
     with a 0.7M activity-filtered slice.
     """
-    touch(tmp_path / "202312", "Census.csv", "Momentum Combined.csv", "GAP.csv")
+    touch(tmp_path / "202312", "Census.csv", "Combined.csv", "Extract.csv")
 
     found = discover(tmp_path)
 
@@ -62,7 +62,7 @@ def test_two_vintages_of_one_month_are_not_stacked(tmp_path: Path):
 
 def test_single_file_months_still_resolve(tmp_path: Path):
     """The flat exports and parquet directories keep working."""
-    touch(tmp_path, "GAP Scored - 202412.csv")
+    touch(tmp_path, "Scored - 202412.csv")
     touch(tmp_path, "Company_Census_File_20250609.csv")
     (tmp_path / "census_20260503").mkdir()
     (tmp_path / "census_20260503" / "part-0.parquet").write_bytes(b"")

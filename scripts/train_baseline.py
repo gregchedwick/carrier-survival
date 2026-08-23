@@ -135,31 +135,44 @@ def main() -> None:
 
     # --- leakage check -----------------------------------------------------
     #
-    # Train on the earliest prediction date only, then score the latest. The
-    # features are staler and the outcome further away, so performance must
-    # fall. If it holds up, something in the feature set is seeing the future.
+    # Train at the earliest prediction date, then score the same held-out
+    # carriers twice: once at that date, once at the latest. Only the age of
+    # the information differs, so performance must fall. If it holds up,
+    # something in the feature set is seeing the future.
+    #
+    # The holdout is drawn from carriers present at BOTH dates. An earlier
+    # version trained on carriers present only at the first date — i.e. those
+    # that dropped out — and scored the ones that persisted. Two different
+    # populations, which inverted the probe (AUC 0.30) rather than measuring
+    # anything about time.
     dates = sorted(frame["prediction_date"].unique())
-    early, late = frame[frame.prediction_date == dates[0]], frame[frame.prediction_date == dates[-1]]
-    shared = set(early.dot_number) & set(late.dot_number)
-    early_only = early[~early.dot_number.isin(shared)]
+    early = frame[frame.prediction_date == dates[0]]
+    late = frame[frame.prediction_date == dates[-1]]
+    shared = np.array(sorted(set(early.dot_number) & set(late.dot_number)))
+
+    rng = np.random.default_rng(0)
+    holdout = set(rng.choice(shared, size=max(len(shared) // 4, 1), replace=False).tolist())
+    fit_rows = early[~early.dot_number.isin(holdout)]
 
     probe = HistGradientBoostingClassifier(max_iter=200, random_state=0)
-    probe.fit(early_only[features], early_only["failed"])
+    probe.fit(fit_rows[features], fit_rows["failed"])
 
+    scored_same = early[early.dot_number.isin(holdout)]
+    scored_late = late[late.dot_number.isin(holdout)]
     same = evaluate(
-        early[early.dot_number.isin(shared)]["failed"].to_numpy(),
-        probe.predict_proba(early[early.dot_number.isin(shared)][features])[:, 1],
+        scored_same["failed"].to_numpy(),
+        probe.predict_proba(scored_same[features])[:, 1],
     )["auc"]
     later = evaluate(
-        late[late.dot_number.isin(shared)]["failed"].to_numpy(),
-        probe.predict_proba(late[late.dot_number.isin(shared)][features])[:, 1],
+        scored_late["failed"].to_numpy(),
+        probe.predict_proba(scored_late[features])[:, 1],
     )["auc"]
 
     print(f"\nleakage check  (trained on {pd.Timestamp(dates[0]).date()})")
     print(f"  scored at the same date : AUC {same:.3f}")
     print(f"  scored {len(dates) - 1} months later : AUC {later:.3f}")
 
-    report = leakage.check(test, features, y_test, decay=same - later)
+    report = leakage.check(test, features, y_test, decay=same - later, probe_auc=same)
     print(report.describe())
 
     strongest = sorted(

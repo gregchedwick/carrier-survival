@@ -96,6 +96,10 @@ class Snapshot:
 
     period: str  # YYYYMM
     path: Path
+    #: Several files can cover one period. The 2024 exports are split into three
+    #: parts that together make up the ~1.86M active carriers; reading only one
+    #: silently models a non-random 39% of the population.
+    part: int = 0
 
     @property
     def as_of(self) -> pd.Timestamp:
@@ -167,34 +171,47 @@ def discover(root: Path) -> list[Snapshot]:
       Delta table where each version is a full snapshot
     * flat ``Company_Census_File_YYYYMMDD.csv`` exports
 
-    Where several cover the same month, the first match wins in the order
-    above — the raw census carries the most columns.
+    Where several *kinds* cover the same month, the first pattern to match wins
+    — the raw census carries the most columns. But every file matching that
+    winning pattern is kept, because an export can be split across parts.
+
+    The distinction matters. A 2024 month directory holds three files that
+    together make up ~1.86M active carriers; taking only the first models a
+    non-random 39% slice, biased by fleet size (the three parts have mean fleet
+    19.9, 3.2 and 97.7). A 2023 month directory holds a full ``Census.csv``
+    *and* a derived extract of the same month — there, matching one pattern
+    rather than everything is what stops two vintages being stacked as if they
+    were one population.
     """
-    found: dict[str, Path] = {}
+    found: dict[str, list[Path]] = {}
 
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
         if re.fullmatch(r"20\d{4}", directory.name):
             for pattern in SNAPSHOT_PATTERNS:
                 matches = sorted(directory.glob(pattern))
                 if matches:
-                    found[directory.name] = matches[0]
+                    found[directory.name] = matches
                     break
         # Parquet snapshot directories, named for the day they were captured.
         elif re.fullmatch(r"census_20\d{6}", directory.name):
             if any(directory.glob("*.parquet")):
-                found.setdefault(directory.name[7:13], directory)
+                found.setdefault(directory.name[7:13], [directory])
 
     for path in sorted(root.glob("*Scored*.csv")):
         match = re.search(r"(20\d{4})", path.name)
         if match:
-            found.setdefault(match.group(1), path)
+            found.setdefault(match.group(1), []).append(path)
 
     for path in sorted(root.glob("Company_Census_File_*.csv")):
         match = re.search(r"(20\d{4})\d{2}", path.name)
         if match:
-            found.setdefault(match.group(1), path)
+            found.setdefault(match.group(1), []).append(path)
 
-    return [Snapshot(period, path) for period, path in sorted(found.items())]
+    return [
+        Snapshot(period, path, part)
+        for period, paths in sorted(found.items())
+        for part, path in enumerate(paths)
+    ]
 
 
 def _reject_constant_columns(frame: pd.DataFrame, source: str) -> None:
@@ -302,6 +319,15 @@ def build_panel(root: Path, verbose: bool = True) -> pd.DataFrame:
             print(f"  {snapshot.period}  {len(frame):>9,} carriers  <- {snapshot.path.name}")
 
     panel = pd.concat(frames, ignore_index=True).sort_values(["dot_number", "as_of"])
+
+    # A multi-part export can list the same carrier twice at the boundary
+    # between parts (a few hundred rows in practice). One row per carrier per
+    # period is what everything downstream assumes.
+    before = len(panel)
+    panel = panel.drop_duplicates(["dot_number", "period"], keep="first")
+    if verbose and before != len(panel):
+        print(f"  dropped {before - len(panel):,} duplicate carrier-periods across parts")
+
     assert_no_proprietary_columns(panel)
     return panel
 

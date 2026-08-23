@@ -88,6 +88,46 @@ def test_degenerate_features_are_skipped_not_scored():
     assert scores == {}
 
 
+def test_improving_with_staleness_is_a_failure_not_a_pass():
+    """A model that gets BETTER as information ages must not pass.
+
+    Regression test. The verdict compared ``abs(decay)`` against the threshold,
+    so a probe whose AUC rose from 0.302 to 0.323 over six months was reported
+    as "degrades as expected" — the exact opposite of what happened.
+    """
+    y = sample()
+    frame = pd.DataFrame({"x": RNG.normal(0, 1, N)})
+
+    report = check(frame, ["x"], y, decay=-MEANINGFUL_DECAY * 5)
+
+    assert not report.passed
+    assert not report.decay_conclusive
+    assert "SUSPECT" in report.describe()
+    assert "IMPROVED" in report.describe()
+
+
+def test_an_inverted_probe_is_reported_as_broken():
+    """A probe scoring below 0.5 is measuring the wrong thing entirely."""
+    y = sample()
+    frame = pd.DataFrame({"x": RNG.normal(0, 1, N)})
+
+    report = check(frame, ["x"], y, decay=0.05, probe_auc=0.302)
+
+    assert not report.passed
+    assert report.probe_inverted
+    assert "BROKEN" in report.describe()
+
+
+def test_a_healthy_probe_does_not_trip_the_inversion_check():
+    y = sample()
+    frame = pd.DataFrame({"x": RNG.normal(0, 1, N)})
+
+    report = check(frame, ["x"], y, decay=0.05, probe_auc=0.74)
+
+    assert report.passed
+    assert not report.probe_inverted
+
+
 def test_small_decay_is_reported_as_inconclusive():
     """A decay within noise must not be reported as a pass.
 

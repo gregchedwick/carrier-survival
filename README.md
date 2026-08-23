@@ -15,20 +15,28 @@ models and leakage controls all run. Results below.
 
 ## Results
 
-617k carriers, 3.8M carrier-months, seven monthly prediction dates in 2024,
-6.08% twelve-month failure rate. Split by **carrier**, not by row — a carrier
+1.94M carriers, 11.8M carrier-months, seven monthly prediction dates in 2024,
+2.25% twelve-month failure rate. Split by **carrier**, not by row — a carrier
 appears at up to seven dates with overlapping outcome windows, so a random row
 split would put the same carrier on both sides and inflate every score.
 
 | Model | AUC | PR-AUC | Base rate | Lift |
 |---|---|---|---|---|
-| Baseline — carrier age + fleet size | 0.668 | 0.098 | 0.061 | 1.6x |
-| **Full feature set** (24 features) | **0.767** | **0.165** | 0.061 | **2.7x** |
+| Baseline — carrier age + fleet size | 0.748 | 0.063 | 0.022 | 2.8x |
+| **Full feature set** (24 features) | **0.874** | **0.145** | 0.022 | **6.5x** |
 
 The baseline is deliberately trivial: two columns anyone can compute in a single
-query. It exists because "the model gets 0.77 AUC" means nothing on its own. The
-full feature set beats it by **+0.099 AUC**, which is the number actually worth
+query. It exists because "the model gets 0.87 AUC" means nothing on its own. The
+full feature set beats it by **+0.127 AUC**, which is the number actually worth
 reporting.
+
+The 2.25% base rate is itself a result. An earlier version of this pipeline read
+one file of a three-part monthly export and reported 6.08% — nearly 3x too high,
+because the part it read was skewed toward carriers that fail. The corrected
+figure cross-checks against the revocation record independently (31k–85k
+failures a year against ~2M carriers, or 1.5–4%), which the old one never did.
+Every metric here is measured against that base, so the error propagated into
+all of them.
 
 ### By fleet size
 
@@ -38,16 +46,19 @@ improve the model.
 
 | Fleet | Carriers | Base rate | AUC | PR-AUC |
 |---|---|---|---|---|
-| 1–2 | 613,684 | 6.7% | 0.741 | 0.167 |
-| 3–5 | 144,218 | 4.3% | 0.824 | 0.170 |
-| 6–20 | 105,161 | 3.5% | 0.837 | 0.151 |
-| 21–100 | 34,469 | 2.7% | 0.848 | 0.140 |
-| 100+ | 6,739 | 1.5% | 0.806 | 0.103 |
+| 1–2 | 2,259,837 | 2.2% | 0.868 | 0.144 |
+| 3–5 | 376,679 | 1.8% | 0.896 | 0.149 |
+| 6–20 | 201,013 | 1.8% | 0.891 | 0.138 |
+| 21–100 | 50,759 | 1.7% | 0.869 | 0.119 |
+| 100+ | 10,777 | 1.1% | 0.803 | 0.067 |
 
-Discrimination is best in the 3–100 unit band — the carriers a broker or insurer
-actually underwrites. One-truck operators are the hardest to call, which is
-intuitive: their failure is often a personal circumstance that leaves no trace in
-any federal file until it has already happened.
+Discrimination is strong and fairly flat from 1 to 100 units, easing off only for
+the largest fleets — where failure is rarest and most idiosyncratic.
+
+Micro-carriers used to be the visible weak spot (0.741 against 0.848 for large
+fleets). That gap was mostly an artefact of the ingestion defect: the part of the
+export being read under-sampled them, so the model saw too few to learn from.
+With the full population they perform in line with everything else.
 
 ### Leakage controls
 
@@ -56,29 +67,39 @@ error to warn you. Two checks run on every training run:
 
 **Solo AUC.** Any single feature separating the outcome implausibly well
 (≥ 0.90) is almost certainly derived from it. The strongest honest feature here
-reaches 0.671:
+reaches 0.732:
 
 ```
-authority_age_days             0.671
-carrier_age_days               0.665
-days_since_authority_action    0.654
-crash_days_since_last          0.635
-distinct_dockets               0.630
+carrier_age_days               0.732
+distinct_dockets               0.695
+authority_actions              0.694
+prior_discontinued             0.690
+crash_days_since_last          0.689
 ```
 
-**Temporal decay.** Train on the earliest prediction date, score six months
-later on staler features. Performance should fall.
+**Temporal decay.** Train at the earliest prediction date, then score the *same
+held-out carriers* twice — once at that date, once six months later. Only the
+age of the information differs, so performance should fall.
 
-The decay check currently reports `+0.004`, and the run labels that
-**inconclusive** rather than passing it — four thousandths is noise, and calling
-it a pass would manufacture confidence the data doesn't support. An earlier
-version of this check printed "OK" off exactly that number.
+```
+scored at the same date : AUC 0.869
+scored 6 months later   : AUC 0.872
+temporal decay: -0.003 - within noise, inconclusive (needs decay > 0.01)
+```
+
+Reported as **inconclusive**, not as a pass. Three thousandths is noise, and
+calling it a pass would manufacture confidence the data doesn't support.
 
 The controls are themselves tested against a **planted leak** — a feature built
 from the outcome with 10% of labels flipped — and the suite asserts the detector
 catches it (`tests/test_leakage.py`). A check that has never been shown to fail
 is not evidence; it may simply be incapable of firing. Training aborts rather
 than reporting results if anything trips.
+
+Three failure modes now abort the run: a feature above the solo-AUC threshold, a
+probe that scores below 0.5 (it is ranking failures as safer than survivors, so
+its decay number is meaningless), and a decay that is meaningfully *negative* —
+performance improving as information ages, which no honest model does.
 
 ---
 
@@ -218,11 +239,51 @@ frozen everywhere else, including five straight months from December 2024 to May
 timestamp advances; the fleet numbers do not.
 
 The features are now correctly null rather than falsely zero, and the training
-script drops them. Model scores are unchanged at 0.767 — they were contributing
-nothing all along.
+script drops them.
 
-Genuine trajectory needs either the FOIA'd internal snapshots or forward
-collection at the boundaries where the column actually refreshes.
+#### It is the whole file, not just that column
+
+`state` is what settles it. Carriers relocate constantly, so that field cannot
+be *exactly* unchanged over a real month — and it isn't, at the one boundary
+that moves:
+
+| Transition | power_units | driver_count | safety_rating | status | state |
+|---|---|---|---|---|---|
+| 202407 → 202408 | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
+| 202409 → 202410 | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
+| **202410 → 202411** | **12.26%** | **12.39%** | **0.61%** | 0.00% | **0.63%** |
+| 202411 → 202412 | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
+
+Every column freezes together and thaws together. That is a republished extract,
+not a field that updates on its own cadence.
+
+#### Even a perfect pipeline would only get so far
+
+Fleet size changes only when a carrier files an MCS-150. That filing is required
+every 24 months on a schedule keyed to the USDOT number — the last digit sets
+the month, the second-to-last sets odd or even year — plus event-triggered
+filings on a change of address, operation type, or authority application.
+
+Roughly **1/24 ≈ 4.2% of carriers can update in any given month.** The single
+genuine refresh shows 12.26%; if that extract was about three months newer than
+the one before it, that is 4.1% per month — which lands on the biennial rate
+almost exactly. Two independent routes to the same number.
+
+So fleet trajectory is inherently a *slow* feature. Even with a flawless nightly
+pull, a three-month delta would be non-zero for only ~12% of carriers, because
+most carriers' reported fleet is stale by regulatory design rather than by any
+defect in the pipeline. It is worth building, but it will never be the crisp
+early-warning signal it intuitively sounds like.
+
+#### The better feature is one this vintage does not carry
+
+`mcs150_date` — *when* the carrier last filed — is 88–90% populated in the
+`mcmis` and `datahub` vintages and **0% in `reporting`**, which is the vintage
+the modelling cohort is drawn from. Days since last filing is likely more
+predictive than fleet size itself: a carrier that sails past its mandated filing
+month has stopped doing paperwork, and carriers that stop doing paperwork are
+winding down. That is a compliance-behaviour signal rather than a size signal,
+and it is the highest-value addition available.
 
 ---
 
@@ -264,6 +325,53 @@ They are ordinary FMCSA public data — the only thing special about them is tha
 someone kept copies. Point `CARRIER_SURVIVAL_SNAPSHOT_DIR` at your own archive;
 no path is hardcoded.
 
+### The 2024 exports come in three parts
+
+Each 2024 month directory holds three files that partition the active
+population. They must all be read:
+
+| Part | Rows (202407) | Mean fleet | p90 |
+|---|---|---|---|
+| GAP Scored | 721,168 | 19.9 | 9 |
+| Not Scored 1 | 350,813 | 3.2 | 5 |
+| Not Scored 2 | 789,387 | 97.7 | 3 |
+| **Combined** | **1,861,368** | | |
+
+1,861,184 of those 1,861,368 rows are distinct carriers, and 99.8% carry
+`status = A`. That matches FMCSA's ~2M active carriers. Only the 2024
+directories are split this way; the 2025 exports are the scored slice alone, so
+those months remain a partial view no matter how they are read.
+
+### Why absence from a snapshot is not the exit signal
+
+The intuitive label — *a carrier in one month and gone the next went out of
+business* — does not survive contact with the data:
+
+```
+transition          prior        now      gone   gone%       new       net
+202406->202407  1,854,671  1,861,184     1,833   0.10%     8,346    +6,513
+202407->202408  1,861,184  1,867,779     1,246   0.07%     7,841    +6,595
+202408->202409  1,867,779  1,876,462     1,938   0.10%    10,621    +8,683
+202409->202410  1,876,462  1,882,556     2,289   0.12%     8,383    +6,094
+```
+
+Disappearance runs 0.07–0.12% per month — about 1% a year, against the 1.5–4%
+annual failure rate the revocation record shows. New registrations outnumber
+disappearances 3–6 to 1, so the population *grows* through a period when the
+freight market was shedding carriers.
+
+Tested directly as a predictor: of carriers that vanished in August 2024 and had
+not returned by October, **4.61% were later revoked, against 3.29% of those that
+stayed — 1.40x lift, over 1,193 carriers.** Too rare to be a label and too weak
+to be a feature.
+
+The reason is that FMCSA leaves carriers in the census long after they stop
+hauling, so membership tracks administrative purges rather than business death.
+This is why the label is built from dated revocation events instead: those are
+timestamped decisions, not inferences drawn from a missing row.
+
+### Automatic quality checks
+
 `coverage_report()` detects three defects automatically rather than leaving them
 to be found later:
 
@@ -286,7 +394,7 @@ carrier's absence from a file.
 
 ---
 
-## Nine silent defects
+## Twelve silent defects
 
 None of these raised an error. Each produced plausible-looking output that was
 wrong, and each now has an automated guardrail and, where testable, a regression
@@ -303,6 +411,29 @@ test. This catalogue is the part of the project most worth reading.
 | 7 | Truncated `202501` export | 206K carriers "exit", 96% of them return in February | `suspect_truncation` flag |
 | 8 | Stale republished exports masked by `NaN != NaN` | Detector saw a 5.6% null rate as 5.6% "changed", clearing its 0.1% threshold — six frozen months reported as fresh | Compare only rows non-null on both sides; regression test with nulls on both sides |
 | 9 | An all-null column reaches sklearn's binner | `ValueError: window shape cannot be larger than input array shape` — says nothing about the cause | Degenerate-column filter before fitting |
+| 10 | A monthly export split across three parts, of which one was read | 717K of 1.86M carriers — a **non-random 39%**, since the parts have mean fleet 19.9, 3.2 and 97.7 | Read every file matching the winning pattern, not the first; de-duplicate on carrier-period |
+| 11 | The decay probe trained on carriers that *dropped out* and scored ones that *persisted* | Two different populations, so the probe inverted — AUC 0.302, ranking failures as safer | Hold out a random slice of carriers present at both dates; abort if probe AUC < 0.5 |
+| 12 | The decay verdict compared `abs(decay)` against its threshold | A probe improving with staleness (0.302 → 0.323) printed "degrades as expected" | Only a *fall* passes; a meaningful rise is a failure |
+
+**Defect 10 was invisible from inside the data.** Every check passed: row counts
+were stable, carrier counts moved plausibly month to month, no column was
+constant, no vintage was mixed. The file simply looked like a complete monthly
+census because it was internally consistent — and nothing in it could reveal
+that two sibling files existed alongside it. It was caught by someone who knew
+how the archive was assembled saying so. No amount of profiling would have
+found it, which is worth remembering before trusting a clean-looking data audit.
+
+**Defects 11 and 12 were in the leakage control itself**, which is the part of
+this repository whose entire purpose is to catch exactly this class of error.
+Both were live while the check printed `0.692 / 0.688 — OK`, and that reassuring
+output was reported as evidence. It was not evidence of anything; the probe was
+already broken, and the population defect simply made the breakage visible by
+pushing the AUC below 0.5 where it could no longer be mistaken for a result.
+
+The lesson is the one the planted-leak test was built for and did not cover: a
+guardrail is only as trustworthy as the failures it has been *shown* to catch.
+The planted leak proved the solo-AUC arm could fire. Nothing had ever proved the
+decay arm could, so it quietly returned a pass for months.
 
 Two more worth noting, though they are judgment rather than defects: revocation
 is not exit (see [The label](#the-label)), and AuthHist carries corrupt dates —
@@ -349,7 +480,7 @@ scripts/
   build_labels.py    Build the exit label table
   build_features.py  Build the modelling frame
   train_baseline.py  Fit baseline + full model, evaluate, check for leakage
-tests/               17 tests: feature construction, coverage, leakage
+tests/               23 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
 
@@ -368,7 +499,7 @@ python scripts/build_panel.py            # carrier-period panel + coverage repor
 python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
 
-pytest                                   # 17 tests
+pytest                                   # 23 tests
 ```
 
 Each fetch writes a manifest recording row counts, distinct carriers, null keys
@@ -395,9 +526,17 @@ dates appear as `MM/DD/YYYY` and `YYYYMMDD`, stored as text throughout.
 - **Seven prediction dates in one year.** Point-in-time features need the
   archived panel, which limits the modelling window to 2024. The model has not
   been tested across a freight cycle.
-- **The temporal-decay check is inconclusive** at `+0.004`. A wider window would
-  be needed to make it informative, which again needs more panel.
+- **The temporal-decay check is inconclusive** at `-0.003`. It is no longer
+  *broken* — see defects 11 and 12 — but six months is not enough separation for
+  it to say anything, which again needs more panel.
 - **Involuntary exit only.** The competing-risks arm is empty for the reasons
   above.
 - **Authority status is a proxy for operating status.** A dormant carrier holding
   active authority is indistinguishable from a working one.
+- **2025 months are a partial population.** Only the 2024 directories hold the
+  three-part export. The 2025 files are the scored slice alone (~700K against a
+  ~1.86M full population), so those periods trip `suspect_truncation` and are
+  excluded from differencing. The exclusion is correct; the label is imprecise —
+  it is a scope difference, not a truncated file.
+- **`mcs150_date` is absent from the modelling vintage**, which blocks the single
+  most promising unbuilt feature. See above.

@@ -38,6 +38,12 @@ IMPLAUSIBLE_SOLO_AUC = 0.90
 MEANINGFUL_DECAY = 0.01
 
 
+#: A probe scoring below this is ranking failures as safer than survivors. That
+#: is not a mild result — it means the probe is measuring something other than
+#: what it was meant to, and its decay number carries no information.
+INVERTED_AUC = 0.5
+
+
 @dataclass(frozen=True)
 class LeakageReport:
     """What the checks found. ``passed`` is false if anything looks wrong."""
@@ -45,10 +51,15 @@ class LeakageReport:
     suspicious: dict[str, float]
     decay: float | None
     decay_conclusive: bool
+    probe_inverted: bool = False
 
     @property
     def passed(self) -> bool:
-        return not self.suspicious
+        # A negative decay beyond noise means performance IMPROVED as the
+        # information got staler, which no honest model does. Treated as a
+        # failure rather than a curiosity.
+        improving = self.decay is not None and self.decay < -MEANINGFUL_DECAY
+        return not self.suspicious and not improving and not self.probe_inverted
 
     def describe(self) -> str:
         # ASCII only: the Windows console codepage mangles em-dashes, and a
@@ -62,14 +73,26 @@ class LeakageReport:
         else:
             lines.append(f"  no feature exceeds solo AUC {IMPLAUSIBLE_SOLO_AUC:.2f}")
 
+        if self.probe_inverted:
+            lines.append(
+                "  BROKEN - the decay probe scores below 0.5, ranking failures as "
+                "safer than survivors. Its decay number means nothing; fix the "
+                "probe before reading it."
+            )
+
         if self.decay is None:
             lines.append("  temporal decay: not evaluated")
-        elif self.decay_conclusive:
+        elif self.decay > MEANINGFUL_DECAY:
             lines.append(f"  temporal decay: {self.decay:+.3f} - degrades as expected")
+        elif self.decay < -MEANINGFUL_DECAY:
+            lines.append(
+                f"  temporal decay: {self.decay:+.3f} - SUSPECT, performance IMPROVED "
+                "as the information got staler"
+            )
         else:
             lines.append(
                 f"  temporal decay: {self.decay:+.3f} - within noise, inconclusive "
-                f"(needs |decay| > {MEANINGFUL_DECAY:.2f})"
+                f"(needs decay > {MEANINGFUL_DECAY:.2f})"
             )
         return "\n".join(lines)
 
@@ -102,6 +125,7 @@ def check(
     y: np.ndarray,
     decay: float | None = None,
     threshold: float = IMPLAUSIBLE_SOLO_AUC,
+    probe_auc: float | None = None,
 ) -> LeakageReport:
     """Run the checks and report. See the module docstring for what each means."""
     solo = single_feature_auc(frame, features, y)
@@ -109,5 +133,8 @@ def check(
     return LeakageReport(
         suspicious=suspicious,
         decay=decay,
-        decay_conclusive=decay is not None and abs(decay) > MEANINGFUL_DECAY,
+        # Only a fall counts. Taking the absolute value here once reported a
+        # probe that got BETTER with staleness as "degrades as expected".
+        decay_conclusive=decay is not None and decay > MEANINGFUL_DECAY,
+        probe_inverted=probe_auc is not None and probe_auc < INVERTED_AUC,
     )

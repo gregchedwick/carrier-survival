@@ -22,14 +22,24 @@ from carrier_survival.census_history import (  # noqa: E402
 )
 from carrier_survival.config import RAW_DIR  # noqa: E402
 
-#: Directory holding the archived monthly FMCSA census pulls, one folder or file
+#: Directories holding archived monthly FMCSA census pulls, one folder or file
 #: per period. Supplied by environment variable rather than hardcoded: the
 #: archive is a local artefact, its location differs per machine, and a personal
 #: path does not belong in a public repository.
+#:
+#: Accepts several directories separated by the platform path separator (``;``
+#: on Windows, ``:`` elsewhere), because the archive legitimately lives in more
+#: than one place. Historical exports are often held wherever they were
+#: originally collected — frequently shared or managed storage — while snapshots
+#: written by ``refresh_census.py`` are public data belonging to this project
+#: alone and have no reason to be added to it.
 ENV_VAR = "CARRIER_SURVIVAL_SNAPSHOT_DIR"
 
+#: Where ``refresh_census.py`` writes. Defaults to the first configured root.
+REFRESH_ENV_VAR = "CARRIER_SURVIVAL_REFRESH_DIR"
 
-def snapshot_root() -> Path:
+
+def snapshot_roots() -> list[Path]:
     configured = os.environ.get(ENV_VAR)
     if not configured:
         raise SystemExit(
@@ -37,19 +47,38 @@ def snapshot_root() -> Path:
             "Point it at the directory holding the archived monthly FMCSA census\n"
             "pulls, then re-run:\n\n"
             f'    setx {ENV_VAR} "D:\\path\\to\\snapshots"     # Windows, persistent\n'
-            f'    export {ENV_VAR}=/path/to/snapshots          # macOS / Linux\n'
+            f'    export {ENV_VAR}=/path/to/snapshots          # macOS / Linux\n\n'
+            "Several directories may be given, separated by "
+            f"{os.pathsep!r}.\n"
         )
-    root = Path(configured)
-    if not root.exists():
-        raise SystemExit(f"{ENV_VAR} points at a missing directory: {root}")
-    return root
+    roots = [Path(part) for part in configured.split(os.pathsep) if part.strip()]
+    missing = [r for r in roots if not r.exists()]
+    if missing:
+        raise SystemExit(
+            f"{ENV_VAR} points at missing "
+            f"{'directories' if len(missing) > 1 else 'directory'}: "
+            + ", ".join(str(m) for m in missing)
+        )
+    return roots
+
+
+def refresh_dir() -> Path:
+    """Where a fresh pull is written. Explicit setting wins; else the first root."""
+    configured = os.environ.get(REFRESH_ENV_VAR)
+    if configured:
+        target = Path(configured)
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    return snapshot_roots()[0]
 
 
 def main() -> None:
-    SNAPSHOT_ROOT = snapshot_root()
+    roots = snapshot_roots()
 
-    print(f"Reading snapshots from {SNAPSHOT_ROOT}\n")
-    panel = build_panel(SNAPSHOT_ROOT)
+    for root in roots:
+        print(f"Reading snapshots from {root}")
+    print()
+    panel = build_panel(roots)
     assert_no_proprietary_columns(panel)
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)

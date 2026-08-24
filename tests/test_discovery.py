@@ -122,3 +122,36 @@ def test_a_refreshed_snapshot_sits_alongside_the_archived_vintages(tmp_path: Pat
     periods = {s.period for s in discover(tmp_path)}
 
     assert periods == {"202407", "202608"}
+
+
+def test_several_roots_are_merged(tmp_path: Path):
+    """The archive may span locations — historical exports and fresh pulls."""
+    import pandas as pd
+
+    archive, local = tmp_path / "archive", tmp_path / "local"
+    touch(archive / "202407", "Data File Scored.csv")
+    local.mkdir()
+    pd.DataFrame({"dot_number": [1], "power_units": [4]}).to_parquet(
+        local / "census_20260823.parquet", index=False
+    )
+
+    found = discover([archive, local])
+
+    assert {s.period for s in found} == {"202407", "202608"}
+
+
+def test_the_earlier_root_wins_a_contested_period(tmp_path: Path):
+    """Configuration order states precedence rather than leaving it to chance.
+
+    Periods merge whole. A one-file pull in a later root must not attach itself
+    to a three-part export in an earlier one, which would leave the period part
+    duplicated and part fresh.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    touch(first / "202407", "Data File Scored.csv", "Data File Not Scored 1.csv")
+    touch(second / "202407", "Data File Scored.csv")
+
+    found = discover([first, second])
+
+    assert len(found) == 2
+    assert all(s.path.parent.parent == first for s in found)

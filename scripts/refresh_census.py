@@ -17,6 +17,15 @@ is that it reproduces from public sources, and a dependency on a private
 workspace would quietly make that false — as well as coupling the model's
 refresh to a schedule it does not control.
 
+Where it writes
+---------------
+``CARRIER_SURVIVAL_REFRESH_DIR`` if set, otherwise the first directory in
+``CARRIER_SURVIVAL_SNAPSHOT_DIR``. Setting it separately is usually right:
+historical exports tend to live wherever they were originally collected, often
+shared or managed storage, and these pulls are public data belonging to this
+project alone. There is no reason to add them to someone else's drive, and good
+reason not to.
+
 Cadence
 -------
 Monthly is enough. Fleet size and the MCS-150 filing date both move on the
@@ -45,7 +54,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from build_panel import snapshot_root  # noqa: E402
+from build_panel import refresh_dir  # noqa: E402
 from carrier_survival.census_history import assert_no_proprietary_columns  # noqa: E402
 from carrier_survival.config import Dataset  # noqa: E402
 from carrier_survival.fmcsa import iter_pages  # noqa: E402
@@ -92,7 +101,7 @@ MIN_EXPECTED_ROWS = 3_000_000
 
 
 def main() -> None:
-    root = snapshot_root()
+    root = refresh_dir()
     stamp = date.today().strftime("%Y%m%d")
     out = root / f"census_{stamp}.parquet"
 

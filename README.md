@@ -540,9 +540,31 @@ a daily-overwritten source becomes usable history — there is no cleverer trick
 and the value compounds only if the pull actually runs.
 
 ```bash
-python scripts/refresh_census.py     # writes census_YYYYMMDD.parquet to the archive
+python scripts/refresh_census.py     # writes census_YYYYMMDD.parquet
 python scripts/build_panel.py && python scripts/build_features.py
 ```
+
+### Where the archive lives
+
+`CARRIER_SURVIVAL_SNAPSHOT_DIR` accepts **several directories**, separated by the
+platform path separator, because the archive legitimately spans more than one
+place:
+
+```bash
+# read from both; write fresh pulls only to the second
+export CARRIER_SURVIVAL_SNAPSHOT_DIR=/archive/historical:/data/carrier-census
+export CARRIER_SURVIVAL_REFRESH_DIR=/data/carrier-census
+```
+
+Historical exports usually sit wherever they were originally collected — often
+shared or managed storage, and often tens of gigabytes that nobody wants to
+move. Snapshots written by `refresh_census.py` are public data belonging to this
+project alone, so they have no reason to be added to someone else's drive.
+Keeping the two apart is a data-ownership decision, not a tidiness one.
+
+Roots merge **whole periods**, earliest root winning a contested one. Merging
+file by file would let a single-file pull attach itself to a three-part export
+and leave the period part stale, part fresh.
 
 The public census (`az4n-8mr2`, 4.49M rows) carries `mcs150_date`,
 `mcs150_mileage`, `power_units`, `total_drivers` and `status_code` — everything
@@ -605,7 +627,7 @@ scripts/
 docs/GLOSSARY.md     Terminology used throughout, defined in context
 docs/metrics.json    Committed results, inspectable without running anything
 docs/charts/         Committed evaluation charts
-tests/               31 tests: discovery, feature construction, coverage, leakage
+tests/               33 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
 
@@ -619,13 +641,14 @@ python scripts/fetch_fmcsa.py            # fetch all defaults (~20 min)
 python scripts/build_labels.py           # build the exit label table
 
 # The panel needs the local census archive; everything else runs from the API.
-export CARRIER_SURVIVAL_SNAPSHOT_DIR=/path/to/snapshots
+export CARRIER_SURVIVAL_SNAPSHOT_DIR=/path/to/snapshots   # or several, see below
+python scripts/refresh_census.py         # optional: archive today's public census
 python scripts/build_panel.py            # carrier-period panel + coverage report
 python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
 python scripts/make_charts.py            # charts + docs/metrics.json
 
-pytest                                   # 31 tests
+pytest                                   # 33 tests
 ```
 
 Each fetch writes a manifest recording row counts, distinct carriers, null keys

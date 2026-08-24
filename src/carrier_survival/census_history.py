@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -162,8 +163,15 @@ SNAPSHOT_PATTERNS = tuple(
 )
 
 
-def discover(root: Path) -> list[Snapshot]:
+def discover(root: Path | Iterable[Path]) -> list[Snapshot]:
     """Find every monthly snapshot under ``root``, newest last.
+
+    Accepts one directory or several. The archive legitimately spans more than
+    one location: historical exports usually sit wherever they were originally
+    collected, while snapshots written by ``refresh_census.py`` are public data
+    belonging to this project alone. Where two roots both cover a period, the
+    earlier root wins — configuration order states the precedence rather than
+    leaving it to whichever happened to be scanned last.
 
     Four layouts accumulate here, reflecting how the archive was collected over
     time rather than any design:
@@ -186,6 +194,26 @@ def discover(root: Path) -> list[Snapshot]:
     rather than everything is what stops two vintages being stacked as if they
     were one population.
     """
+    roots = [root] if isinstance(root, Path) else list(root)
+
+    found: dict[str, list[Path]] = {}
+    for one in roots:
+        # Whole periods, not individual files. Merging file-by-file across roots
+        # would let a one-file pull in a later root attach itself to a
+        # three-part export in an earlier one, producing a period that is
+        # part-duplicated and part-fresh.
+        for period, paths in _scan(one).items():
+            found.setdefault(period, paths)
+
+    return [
+        Snapshot(period, path, part)
+        for period, paths in sorted(found.items())
+        for part, path in enumerate(paths)
+    ]
+
+
+def _scan(root: Path) -> dict[str, list[Path]]:
+    """Every period found under one root, resolved independently of any other."""
     found: dict[str, list[Path]] = {}
 
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -216,6 +244,8 @@ def discover(root: Path) -> list[Snapshot]:
     # no archive of that.
     for path in sorted(root.glob("census_20??????.parquet")):
         found.setdefault(path.stem[7:13], []).append(path)
+
+    return found
 
     return [
         Snapshot(period, path, part)
@@ -360,8 +390,8 @@ def load_snapshot(snapshot: Snapshot) -> pd.DataFrame:
     return frame
 
 
-def build_panel(root: Path, verbose: bool = True) -> pd.DataFrame:
-    """Stack every snapshot into a carrier-period panel."""
+def build_panel(root: Path | Iterable[Path], verbose: bool = True) -> pd.DataFrame:
+    """Stack every snapshot into a carrier-period panel. See :func:`discover`."""
     snapshots = discover(root)
     if not snapshots:
         raise SystemExit(f"No monthly snapshots found under {root}")

@@ -262,7 +262,8 @@ information available at the prediction date:
 | **Filing behaviour** | Days since last MCS-150 filing, age of the reported mileage year |
 
 Three columns are dropped automatically as degenerate: `mileage` (100% null in
-every vintage) and both fleet-trajectory features — see below.
+every *archived* vintage — the public API carries it at 95.9%, so fresh pulls fix
+this going forward) and both fleet-trajectory features — see below.
 
 ### The fleet-trajectory features cannot be built from this archive
 
@@ -316,16 +317,30 @@ every 24 months on a schedule keyed to the USDOT number — the last digit sets
 the month, the second-to-last sets odd or even year — plus event-triggered
 filings on a change of address, operation type, or authority application.
 
-Roughly **1/24 ≈ 4.2% of carriers can update in any given month.** The single
-genuine refresh shows 12.26%; if that extract was about three months newer than
-the one before it, that is 4.1% per month — which lands on the biennial rate
-almost exactly. Two independent routes to the same number.
+Roughly **1/24 ≈ 4.2% of carriers can update in any given month**, and the one
+genuine refresh in the reporting archive shows 12.26% over about three months —
+4.1% per month, landing on the biennial rate almost exactly.
 
-So fleet trajectory is inherently a *slow* feature. Even with a flawless nightly
-pull, a three-month delta would be non-zero for only ~12% of carriers, because
-most carriers' reported fleet is stale by regulatory design rather than by any
-defect in the pipeline. It is worth building, but it will never be the crisp
-early-warning signal it intuitively sounds like.
+But the filing rate is a *ceiling*, not the answer, and the gap between them
+turned out to matter. Measured directly across two consecutive fresh pulls 28
+days apart:
+
+| Field | Carriers changed |
+|---|---|
+| `mcs150_date` | **240,179 (6.13%)** |
+| `power_units` | 10,446 (0.23%) |
+
+Carriers file on schedule, but **most filings do not change the truck count** —
+they are address updates and re-certifications. So fleet size moves roughly 0.2%
+a month even against a perfectly fresh source, and a three-month delta would be
+non-zero for well under 1% of carriers. An earlier estimate here put that at
+~12%, reasoning from the filing cycle alone; the direct measurement is more than
+an order of magnitude lower.
+
+Fleet trajectory is therefore not merely limited by this archive. It is a weak
+feature by nature, and no pipeline improvement rescues it. Filing *recency*,
+which moves 6% a month, is where the signal actually is — which is what the
+model independently found.
 
 #### The better feature is filing behaviour, not fleet size
 
@@ -572,9 +587,14 @@ the model uses. Its column names already match the canonical keys the loader
 resolves, so archived CSV vintages and fresh API pulls land in the same panel
 with no translation layer.
 
-**Monthly is the right cadence.** Fleet size and filing date both move on the
-biennial MCS-150 cycle — about 4% of carriers in any month — so a faster pull
-buys resolution the source does not have.
+**Monthly is the right cadence**, confirmed by measurement rather than assumed.
+Across two consecutive pulls 28 days apart, `mcs150_date` changed for 6.13% of
+carriers and `power_units` for 0.23%. A weekly pull would spend four times the
+requests to watch a field that moves a few percent a month.
+
+A fresh snapshot is immediately usable: the August 2026 pull came in at 4,490,454
+carriers, 1.007x the median for its vintage, and cleared truncation, population
+break and staleness on the first try — `safe_to_diff` with no special-casing.
 
 Two guards, because a bad pull is worse than no pull: the request is refused if
 it returns under 3M rows (a partial response would read downstream as a

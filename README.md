@@ -531,6 +531,45 @@ of the truth for months.
 
 ---
 
+## Keeping it current
+
+FMCSA overwrites the company census in place and publishes no archive, so
+today's snapshot is unrecoverable tomorrow. Point-in-time features need what was
+true *then*. Keeping a dated copy of every pull is the whole mechanism by which
+a daily-overwritten source becomes usable history — there is no cleverer trick,
+and the value compounds only if the pull actually runs.
+
+```bash
+python scripts/refresh_census.py     # writes census_YYYYMMDD.parquet to the archive
+python scripts/build_panel.py && python scripts/build_features.py
+```
+
+The public census (`az4n-8mr2`, 4.49M rows) carries `mcs150_date`,
+`mcs150_mileage`, `power_units`, `total_drivers` and `status_code` — everything
+the model uses. Its column names already match the canonical keys the loader
+resolves, so archived CSV vintages and fresh API pulls land in the same panel
+with no translation layer.
+
+**Monthly is the right cadence.** Fleet size and filing date both move on the
+biennial MCS-150 cycle — about 4% of carriers in any month — so a faster pull
+buys resolution the source does not have.
+
+Two guards, because a bad pull is worse than no pull: the request is refused if
+it returns under 3M rows (a partial response would read downstream as a
+population collapse), and an existing snapshot for the day is never overwritten.
+
+Only 15 of the 53 available columns are requested. The rest are contact details
+— phone, email, officer names, D&B number — that this project has no reason to
+hold. Narrowing the projection is a privacy decision before it is a performance
+one.
+
+**This deliberately does not read from any private warehouse.** The project's
+claim is that it reproduces from public sources; a dependency on a private
+workspace would quietly make that false, and would couple the model to a refresh
+schedule it does not control.
+
+---
+
 ## Boundaries
 
 The local snapshot files also contain proprietary risk scores from a separate
@@ -557,6 +596,7 @@ src/carrier_survival/
   leakage.py         Solo-AUC and temporal-decay leakage detection
 scripts/
   fetch_fmcsa.py     Download FMCSA sources to data/raw/
+  refresh_census.py  Archive a dated copy of the public census (run monthly)
   build_panel.py     Build the carrier-period panel from local snapshots
   build_labels.py    Build the exit label table
   build_features.py  Build the modelling frame
@@ -565,7 +605,7 @@ scripts/
 docs/GLOSSARY.md     Terminology used throughout, defined in context
 docs/metrics.json    Committed results, inspectable without running anything
 docs/charts/         Committed evaluation charts
-tests/               29 tests: discovery, feature construction, coverage, leakage
+tests/               31 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
 
@@ -585,7 +625,7 @@ python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
 python scripts/make_charts.py            # charts + docs/metrics.json
 
-pytest                                   # 29 tests
+pytest                                   # 31 tests
 ```
 
 Each fetch writes a manifest recording row counts, distinct carriers, null keys
@@ -627,9 +667,10 @@ single hard-coded format silently nulls a whole vintage (defect 13).
   excluded from differencing. The exclusion is correct; the label is imprecise —
   it is a scope difference, not a truncated file.
 - **`days_since_mcs150` is read with a lag of up to eight months**, because the
-  only vintages carrying it precede the prediction window. It is the strongest
-  feature in the model despite that; a live monthly feed carrying the field
-  would strengthen it further.
+  only *archived* vintages carrying it precede the prediction window. It is the
+  strongest feature in the model despite that. `scripts/refresh_census.py` closes
+  this going forward — see [Keeping it current](#keeping-it-current) — but it
+  cannot retroactively fill 2024.
 - **`business_org` is all-null in the modelling window.** It appears only in the
   `datahub` vintages, which post-date every 2024 prediction date, so the
   point-in-time lookup correctly finds nothing.

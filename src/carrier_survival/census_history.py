@@ -123,7 +123,10 @@ class Snapshot:
         so the vintage is recorded here rather than left to be rediscovered.
         """
         name = self.path.name.lower()
-        if re.fullmatch(r"census_20\d{6}", name) or name.startswith("company_census_file"):
+        if (
+            re.fullmatch(r"census_20\d{6}(\.parquet)?", name)
+            or name.startswith("company_census_file")
+        ):
             return "datahub"
         if name.startswith("census"):
             return "mcmis"
@@ -207,6 +210,13 @@ def discover(root: Path) -> list[Snapshot]:
         if match:
             found.setdefault(match.group(1), []).append(path)
 
+    # Snapshots written by scripts/refresh_census.py, one Parquet file per pull.
+    # This is how the daily-overwritten public census becomes history: keep the
+    # copies. Point-in-time features need what was true then, and FMCSA publishes
+    # no archive of that.
+    for path in sorted(root.glob("census_20??????.parquet")):
+        found.setdefault(path.stem[7:13], []).append(path)
+
     return [
         Snapshot(period, path, part)
         for period, paths in sorted(found.items())
@@ -274,17 +284,28 @@ def _reject_constant_columns(frame: pd.DataFrame, source: str) -> None:
             )
 
 
+def _is_parquet(path: Path) -> bool:
+    """A snapshot may be a Parquet directory, a single Parquet file, or a CSV.
+
+    The directory form comes from a Delta export (many part files); the single
+    file from :mod:`scripts.refresh_census`, which writes one snapshot per pull.
+    """
+    return path.is_dir() or path.suffix.lower() == ".parquet"
+
+
 def _header_columns(path: Path) -> list[str]:
     """Column names only, without reading the body."""
     if path.is_dir():
         part = next(iter(sorted(path.glob("*.parquet"))))
         return list(pq.ParquetFile(part).schema.names)
+    if path.suffix.lower() == ".parquet":
+        return list(pq.ParquetFile(path).schema.names)
     return list(pd.read_csv(path, nrows=0, encoding="latin-1").columns)
 
 
 def _read_columns(path: Path, columns: list[str]) -> pd.DataFrame:
-    """Read the named columns from either a CSV or a Parquet directory."""
-    if path.is_dir():
+    """Read the named columns from a CSV, a Parquet file, or a Parquet directory."""
+    if _is_parquet(path):
         return pd.read_parquet(path, columns=columns)
     return pd.read_csv(path, usecols=columns, encoding="latin-1", low_memory=False)
 

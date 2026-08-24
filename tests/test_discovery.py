@@ -72,3 +72,53 @@ def test_single_file_months_still_resolve(tmp_path: Path):
     assert found["202412"].source_kind == "reporting"
     assert found["202506"].source_kind == "datahub"
     assert found["202605"].source_kind == "datahub"
+
+
+def test_a_refreshed_census_parquet_is_found_and_read(tmp_path: Path):
+    """Snapshots written by refresh_census.py must join the panel.
+
+    A single Parquet file, not a directory of part files — the helpers branched
+    on ``is_dir()``, so a flat ``.parquet`` fell through to the CSV reader.
+    """
+    import pandas as pd
+
+    from carrier_survival.census_history import _header_columns, _read_columns, load_snapshot
+
+    pd.DataFrame({
+        "dot_number": [1, 2, 3],
+        "power_units": [4, 9, 2],
+        "total_drivers": [5, 11, 3],
+        "status_code": ["A", "A", "I"],
+        "mcs150_date": ["20231020 2057", "20220218 0000", "20210105 0000"],
+        "phy_state": ["NV", "CA", "TX"],
+    }).to_parquet(tmp_path / "census_20260823.parquet", index=False)
+
+    found = discover(tmp_path)
+
+    assert len(found) == 1
+    snapshot = found[0]
+    assert snapshot.period == "202608"
+    assert snapshot.source_kind == "datahub"
+
+    assert "mcs150_date" in _header_columns(snapshot.path)
+    assert len(_read_columns(snapshot.path, ["dot_number", "power_units"])) == 3
+
+    frame = load_snapshot(snapshot)
+    assert list(frame["power_units"]) == [4, 9, 2]
+    # The API appends a time to the date; it must still parse.
+    assert frame["mcs150_date"].notna().all()
+    assert frame["mcs150_date"].iloc[0] == pd.Timestamp("2023-10-20")
+
+
+def test_a_refreshed_snapshot_sits_alongside_the_archived_vintages(tmp_path: Path):
+    """A new pull must not displace or duplicate what is already there."""
+    import pandas as pd
+
+    touch(tmp_path / "202407", "Data File Scored.csv")
+    pd.DataFrame({"dot_number": [1], "power_units": [4]}).to_parquet(
+        tmp_path / "census_20260823.parquet", index=False
+    )
+
+    periods = {s.period for s in discover(tmp_path)}
+
+    assert periods == {"202407", "202608"}

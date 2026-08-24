@@ -11,6 +11,10 @@ them are backward-looking: you can check whether a carrier's authority is active
 **Status: working end-to-end.** Ingestion, labels, point-in-time features,
 models and leakage controls all run. Results below.
 
+New to survival modelling or to the terms used here — *vintage*, *leakage*,
+*point-in-time*, *lift*? [**docs/GLOSSARY.md**](docs/GLOSSARY.md) defines them in
+the context of this project rather than in the abstract.
+
 ---
 
 ## Results
@@ -22,7 +26,7 @@ split would put the same carrier on both sides and inflate every score.
 
 | Model | AUC | PR-AUC | Base rate | Lift |
 |---|---|---|---|---|
-| Baseline — carrier age + fleet size | 0.748 | 0.063 | 0.022 | 2.8x |
+| Baseline — carrier age + fleet size | 0.748 | 0.062 | 0.022 | 2.8x |
 | **Full feature set** (26 features) | **0.889** | **0.150** | 0.022 | **6.7x** |
 
 The baseline is deliberately trivial: two columns anyone can compute in a single
@@ -48,9 +52,9 @@ improve the model.
 |---|---|---|---|---|
 | 1–2 | 2,259,837 | 2.2% | 0.887 | 0.150 |
 | 3–5 | 376,679 | 1.8% | 0.908 | 0.152 |
-| 6–20 | 201,013 | 1.8% | 0.898 | 0.141 |
-| 21–100 | 50,759 | 1.7% | 0.875 | 0.125 |
-| 100+ | 10,777 | 1.1% | 0.821 | 0.096 |
+| 6–20 | 201,013 | 1.8% | 0.898 | 0.139 |
+| 21–100 | 50,759 | 1.7% | 0.876 | 0.124 |
+| 100+ | 10,777 | 1.1% | 0.813 | 0.109 |
 
 Discrimination is strong and fairly flat from 1 to 100 units, easing off only for
 the largest fleets — where failure is rarest and most idiosyncratic.
@@ -415,7 +419,7 @@ carrier's absence from a file.
 
 ---
 
-## Twelve silent defects
+## Thirteen silent defects
 
 None of these raised an error. Each produced plausible-looking output that was
 wrong, and each now has an automated guardrail and, where testable, a regression
@@ -435,6 +439,7 @@ test. This catalogue is the part of the project most worth reading.
 | 10 | A monthly export split across three parts, of which one was read | 717K of 1.86M carriers — a **non-random 39%**, since the parts have mean fleet 19.9, 3.2 and 97.7 | Read every file matching the winning pattern, not the first; de-duplicate on carrier-period |
 | 11 | The decay probe trained on carriers that *dropped out* and scored ones that *persisted* | Two different populations, so the probe inverted — AUC 0.302, ranking failures as safer | Hold out a random slice of carriers present at both dates; abort if probe AUC < 0.5 |
 | 12 | The decay verdict compared `abs(decay)` against its threshold | A probe improving with staleness (0.302 → 0.323) printed "degrades as expected" | Only a *fall* passes; a meaningful rise is a failure |
+| 13 | A third date format (`M/D/YYYY`) in one vintage, parsed with a hard-coded `format="%Y%m%d"` and `errors="coerce"` | Every date in the Nov 2023 export became `NaT`, reading downstream as "the source never carried this field" | Try the dominant format, fall back to a general parse, and **raise** if under 10% of populated values parse |
 
 **Defect 10 was invisible from inside the data.** Every check passed: row counts
 were stable, carrier counts moved plausibly month to month, no column was
@@ -443,6 +448,14 @@ census because it was internally consistent — and nothing in it could reveal
 that two sibling files existed alongside it. It was caught by someone who knew
 how the archive was assembled saying so. No amount of profiling would have
 found it, which is worth remembering before trusting a clean-looking data audit.
+
+**Defect 13 produced a false conclusion, not just a gap.** The November 2023
+export's dates all coerced to `NaT`, and the coverage report duly showed that
+vintage as 0% populated for `mcs150_date` — which was read, reasonably and
+wrongly, as evidence that FMCSA had not yet added the field. The column was
+there all along, at 89%, in a different format under a different name. A silent
+parse failure and an absent field are indistinguishable downstream, which is why
+the parser now raises instead of coercing.
 
 **Defects 11 and 12 were in the leakage control itself**, which is the part of
 this repository whose entire purpose is to catch exactly this class of error.
@@ -501,7 +514,8 @@ scripts/
   build_labels.py    Build the exit label table
   build_features.py  Build the modelling frame
   train_baseline.py  Fit baseline + full model, evaluate, check for leakage
-tests/               26 tests: discovery, feature construction, coverage, leakage
+docs/GLOSSARY.md     Terminology used throughout, defined in context
+tests/               29 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
 
@@ -520,7 +534,7 @@ python scripts/build_panel.py            # carrier-period panel + coverage repor
 python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
 
-pytest                                   # 26 tests
+pytest                                   # 29 tests
 ```
 
 Each fetch writes a manifest recording row counts, distinct carriers, null keys
@@ -534,8 +548,10 @@ arrives. Nothing errors — the row count comes out right and the contents are
 quietly wrong.
 
 **Keys and dates are normalised on ingest.** The USDOT number is `dot_number` in
-some files and `usdot_number` in others, zero-padded in one and bare in the next;
-dates appear as `MM/DD/YYYY` and `YYYYMMDD`, stored as text throughout.
+some files and `usdot_number` in others, zero-padded in one and bare in the next.
+Dates arrive in three shapes across the archive — `YYYYMMDD` as text, the same as
+an integer in the Parquet vintage, and `M/D/YYYY` in the Nov 2023 export — so a
+single hard-coded format silently nulls a whole vintage (defect 13).
 
 ---
 

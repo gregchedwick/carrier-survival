@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -74,3 +75,45 @@ def test_staleness_is_not_compared_across_vintages():
     report = coverage_report(panel).set_index("period")
 
     assert not report.loc["202506", "stale_export"]
+
+
+# --------------------------------------------------------------------------
+# date parsing across vintages
+# --------------------------------------------------------------------------
+
+
+def test_each_vintage_date_format_parses():
+    """Three formats appear across the archive and all must survive ingest.
+
+    Regression test. The parser hard-coded ``format="%Y%m%d"`` with
+    ``errors="coerce"``, so the November 2023 export's ``M/D/YYYY`` dates all
+    became NaT. Downstream that read as "the source did not carry this field"
+    rather than "the parser did not understand it".
+    """
+    from carrier_survival.census_history import _parse_dates
+
+    text_ymd = _parse_dates(pd.Series(["20220609", "20231023"]), "t")
+    slashed = _parse_dates(pd.Series(["9/25/2023", "7/5/2023"]), "t")
+    integers = _parse_dates(pd.Series([20220609, 20231023]), "t")
+
+    assert list(text_ymd) == [pd.Timestamp("2022-06-09"), pd.Timestamp("2023-10-23")]
+    assert list(slashed) == [pd.Timestamp("2023-09-25"), pd.Timestamp("2023-07-05")]
+    assert list(integers) == [pd.Timestamp("2022-06-09"), pd.Timestamp("2023-10-23")]
+
+
+def test_blanks_stay_null_without_tripping_the_guard():
+    """Genuinely empty values are missing data, not a format failure."""
+    from carrier_survival.census_history import _parse_dates
+
+    out = _parse_dates(pd.Series([None, "", "20220609"]), "t")
+
+    assert out.isna().sum() == 2
+    assert out.notna().sum() == 1
+
+
+def test_an_unparseable_date_column_raises_instead_of_nulling():
+    """A format nobody recognises must fail loudly, not vanish."""
+    from carrier_survival.census_history import _parse_dates
+
+    with pytest.raises(ValueError, match="Unrecognised format"):
+        _parse_dates(pd.Series(["banana"] * 2000), "some_file:add_date")

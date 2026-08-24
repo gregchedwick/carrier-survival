@@ -214,6 +214,47 @@ def discover(root: Path) -> list[Snapshot]:
     ]
 
 
+#: Refuse a date column that parses for almost nobody. A vintage using an
+#: unrecognised format coerces to null silently and looks like a field the
+#: source simply did not populate.
+MIN_DATE_PARSE_RATE = 0.10
+
+
+def _parse_dates(values: pd.Series, source: str) -> pd.Series:
+    """Parse a date column that arrives in a different format per vintage.
+
+    Three formats appear across the archive: ``YYYYMMDD`` as text in the later
+    CSVs, the same as an integer in the Parquet vintage, and ``M/D/YYYY`` in the
+    November 2023 export. A hard-coded ``format="%Y%m%d"`` with
+    ``errors="coerce"`` turned every date in that third vintage into ``NaT``
+    without complaint, which read downstream as "the source did not carry this
+    field" rather than "the parser did not understand it".
+
+    So: try the dominant format, then fall back to a general parse for whatever
+    is left, and raise if the result is still mostly empty.
+    """
+    text = values.astype("string").str.strip()
+    populated = text.notna() & (text != "")
+    if not populated.any():
+        return pd.to_datetime(pd.Series([pd.NaT] * len(values), index=values.index))
+
+    parsed = pd.to_datetime(text.str.slice(0, 8), format="%Y%m%d", errors="coerce")
+
+    missed = populated & parsed.isna()
+    if missed.any():
+        parsed.loc[missed] = pd.to_datetime(text[missed], errors="coerce", format="mixed")
+
+    rate = parsed.notna().sum() / populated.sum()
+    if rate < MIN_DATE_PARSE_RATE:
+        example = text[populated].iloc[0]
+        raise ValueError(
+            f"{source}: only {rate:.1%} of populated dates parsed. "
+            f"Unrecognised format (first value: {example!r}). "
+            "Refusing to emit a column of nulls that looks like missing data."
+        )
+    return parsed
+
+
 def _reject_constant_columns(frame: pd.DataFrame, source: str) -> None:
     """Raise if a per-carrier measure has no variance across the file.
 
@@ -282,16 +323,9 @@ def load_snapshot(snapshot: Snapshot) -> pd.DataFrame:
         if column in frame.columns:
             frame[column] = frame[column].astype("string").str.strip()
 
-    # YYYYMMDD, but as an integer in the Parquet vintage and text in the CSVs.
-    # Concatenating the two without normalising yields an object column that
-    # only fails when the panel is written, minutes later.
     for column in ("add_date", "mcs150_date"):
         if column in frame.columns:
-            frame[column] = pd.to_datetime(
-                frame[column].astype("string").str.slice(0, 8),
-                format="%Y%m%d",
-                errors="coerce",
-            )
+            frame[column] = _parse_dates(frame[column], f"{snapshot.path.name}:{column}")
 
     frame["as_of"] = snapshot.as_of
     frame["period"] = snapshot.period

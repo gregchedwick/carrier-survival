@@ -42,6 +42,28 @@ failures a year against ~2M carriers, or 1.5–4%), which the old one never did.
 Every metric here is measured against that base, so the error propagated into
 all of them.
 
+![ROC and precision–recall curves](docs/charts/roc_pr.svg)
+
+The precision–recall panel is the honest one. At a 2.2% base rate, ROC flatters
+any model by rewarding correct rankings among the vast majority of survivors;
+PR shows what actually happens when you go looking for the rare event.
+
+### What it buys you
+
+The question a broker or underwriter actually asks is not "what is the AUC" but
+"if I only have time to review part of my book, how much of the risk do I catch?"
+
+| Review the riskiest… | Failures captured |
+|---|---|
+| 5% of carriers | **37%** |
+| 10% of carriers | **58%** |
+| 20% of carriers | **80%** |
+
+![Cumulative gains curve](docs/charts/gains.svg)
+
+Reviewing one carrier in ten surfaces well over half of everything that fails in
+the following year.
+
 ### By fleet size
 
 Segmented at evaluation rather than filtered at training — micro-carriers are
@@ -56,6 +78,8 @@ improve the model.
 | 21–100 | 50,759 | 1.7% | 0.876 | 0.124 |
 | 100+ | 10,777 | 1.1% | 0.813 | 0.109 |
 
+![Discrimination by fleet size](docs/charts/segments.svg)
+
 Discrimination is strong and fairly flat from 1 to 100 units, easing off only for
 the largest fleets — where failure is rarest and most idiosyncratic.
 
@@ -63,6 +87,29 @@ Micro-carriers used to be the visible weak spot (0.741 against 0.848 for large
 fleets). That gap was mostly an artefact of the ingestion defect: the part of the
 export being read under-sampled them, so the model saw too few to learn from.
 With the full population they perform in line with everything else.
+
+### Calibration
+
+Ranking and calibration are independent. A model can order carriers perfectly
+and still be badly wrong about the *level* of risk — and level is what you need
+the moment a number touches pricing rather than prioritisation.
+
+| Measure | Value |
+|---|---|
+| Brier score | **0.0202** |
+| Expected calibration error | **0.00078** |
+
+![Calibration curve](docs/charts/calibration.svg)
+
+An ECE of 0.0008 against a 2.24% base rate means predicted risk tracks observed
+failure to within roughly **0.08 percentage points** on average. Buckets are
+equal-count rather than equal-width: at a 2% base rate predictions pile up at the
+low end, so equal-width buckets leave the top ones nearly empty and the curve
+degenerates into noise.
+
+The model is usable for pricing as well as triage, which was an open question
+until this was measured — and worth stating plainly, because a good AUC is
+routinely mistaken for evidence of calibration when it is no evidence at all.
 
 ### Leakage controls
 
@@ -514,7 +561,10 @@ scripts/
   build_labels.py    Build the exit label table
   build_features.py  Build the modelling frame
   train_baseline.py  Fit baseline + full model, evaluate, check for leakage
+  make_charts.py     Write docs/charts/*.svg and docs/metrics.json
 docs/GLOSSARY.md     Terminology used throughout, defined in context
+docs/metrics.json    Committed results, inspectable without running anything
+docs/charts/         Committed evaluation charts
 tests/               29 tests: discovery, feature construction, coverage, leakage
 data/                Parquet + manifests (gitignored; re-fetchable)
 ```
@@ -533,6 +583,7 @@ export CARRIER_SURVIVAL_SNAPSHOT_DIR=/path/to/snapshots
 python scripts/build_panel.py            # carrier-period panel + coverage report
 python scripts/build_features.py         # point-in-time modelling frame
 python scripts/train_baseline.py         # models, segments, leakage checks
+python scripts/make_charts.py            # charts + docs/metrics.json
 
 pytest                                   # 29 tests
 ```

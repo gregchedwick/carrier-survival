@@ -177,8 +177,20 @@ rather than filtering small carriers out of training. Dropping them would change
 the base rate rather than improve the model.
 
 **Calibration** — whether a predicted 5% risk actually fails 5% of the time.
-Distinct from ranking: a model can rank perfectly and still be badly calibrated.
-Not yet assessed here, and it would be required before any pricing use.
+Distinct from ranking: a model can rank perfectly and still be badly calibrated,
+so a good AUC is no evidence at all about calibration. Measured here at Brier
+0.0202 and ECE 0.00078.
+
+**Brier score** — mean squared error of the predicted probabilities. Lower is
+better; it rewards being both correct and confident.
+
+**Expected calibration error (ECE)** — average gap between predicted risk and
+observed failure rate across buckets. 0.00078 against a 2.24% base rate means
+predictions land within about 0.08 percentage points.
+
+**Cumulative gains** — of all the failures that occur, what share sits in the
+riskiest N% of the book. The most directly operational way to state a model's
+value: here, reviewing 10% of carriers surfaces 58% of failures.
 
 ---
 
